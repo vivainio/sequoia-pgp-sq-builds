@@ -42,11 +42,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            cargo-target
           key: al2023-cargo-sq-${{ env.SQ_VERSION }}
           restore-keys: |
             al2023-cargo-sq-
 
       - name: Build sq
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
         run: |
           export PATH="$PWD/capnproto/c++/build-out/src/capnp:$PATH"
           capnp --version
