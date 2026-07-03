@@ -25,3 +25,18 @@ cargo install sequoia-sq --locked --root ./install
 ```
 
 Runtime (on a fresh AL2023 host) additionally needs: `dnf install -y nettle gmp sqlite`.
+
+## Cutting a new release
+
+1. Bump `SQ_VERSION` (and `CAPNP_VERSION`, if needed) in
+   `.github/workflows/build.yml`, commit, and push to `main`.
+2. Trigger a publishing run:
+   ```
+   gh workflow run build.yml --repo vivainio/sequoia-pgp-sq-builds -f publish=true
+   ```
+3. CI builds, strips, and publishes the binary to a GitHub release tagged
+   `v$SQ_VERSION` (via `softprops/action-gh-release`, using the workflow's own
+   `GITHUB_TOKEN` — no local artifact handling or manual `git tag` needed).
+
+Plain pushes to `main` (or PRs) build and upload a workflow artifact but do
+not publish a release — only an explicit `publish=true` dispatch does that.
