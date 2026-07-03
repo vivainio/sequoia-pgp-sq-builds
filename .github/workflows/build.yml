@@ -19,7 +19,7 @@ jobs:
       - name: Install build dependencies
         run: |
           dnf install -y gcc gcc-c++ clang-devel cmake make nettle-devel gmp-devel \
-            pkgconf-pkg-config rust cargo git sqlite-devel openssl-devel
+            pkgconf-pkg-config rust cargo git sqlite-devel openssl-devel tar
 
       - uses: actions/checkout@v4
 
