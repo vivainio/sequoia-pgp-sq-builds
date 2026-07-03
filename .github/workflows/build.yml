@@ -1,0 +1,70 @@
+name: Build sq for AL2023
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CAPNP_VERSION: v1.1.0
+  SQ_VERSION: 1.3.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: amazonlinux:2023
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y gcc gcc-c++ clang-devel cmake make nettle-devel gmp-devel \
+            pkgconf-pkg-config rust cargo git sqlite-devel openssl-devel
+
+      - uses: actions/checkout@v4
+
+      - name: Cache capnp build
+        id: capnp-cache
+        uses: actions/cache@v4
+        with:
+          path: capnproto/c++/build-out/src/capnp/capnp
+          key: al2023-capnp-${{ env.CAPNP_VERSION }}
+
+      - name: Build capnp compiler from source
+        if: steps.capnp-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$CAPNP_VERSION" https://github.com/capnproto/capnproto.git
+          cmake -S capnproto/c++ -B capnproto/c++/build-out -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build capnproto/c++/build-out -j"$(nproc)" --target capnp_tool
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: al2023-cargo-sq-${{ env.SQ_VERSION }}
+          restore-keys: |
+            al2023-cargo-sq-
+
+      - name: Build sq
+        run: |
+          export PATH="$PWD/capnproto/c++/build-out/src/capnp:$PATH"
+          capnp --version
+          cargo install sequoia-sq --version "$SQ_VERSION" --locked --root ./install
+
+      - name: Sanity check
+        run: |
+          dnf install -y nettle gmp sqlite
+          ./install/bin/sq --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sq-al2023
+          path: install/bin/sq
+          if-no-files-found: error
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: install/bin/sq
