@@ -1,4 +1,4 @@
-name: Build sq for AL2023
+name: Build sq
 
 on:
   push:
@@ -8,20 +8,22 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish a GitHub release with the built binary
+        description: Publish a GitHub release with the built binaries
         type: boolean
         default: false
 
 env:
   CAPNP_VERSION: v1.1.0
   SQ_VERSION: 1.3.1
+  OPENSSL_VERSION: 3.3.2
+  SQLITE_YEAR: "2024"
+  SQLITE_AMALGAMATION: sqlite-amalgamation-3460100
 
 jobs:
-  build:
+  build-al2023:
+    name: build (AL2023, glibc, crypto-nettle)
     runs-on: ubuntu-latest
     container: amazonlinux:2023
-    permissions:
-      contents: write
     steps:
       - name: Install build dependencies
         run: |
@@ -72,14 +74,129 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sq-al2023
+          name: sq-al2023-x86_64-glibc
           path: install/bin/sq
           if-no-files-found: error
 
-      - name: Publish release
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
-        uses: softprops/action-gh-release@v2
+  build-musl:
+    # Fully static musl binary. Uses the crypto-rust backend (pure Rust, no
+    # nettle/gmp) since cross-building those statically for musl isn't
+    # practical. crypto-rust is explicitly documented as not constant-time;
+    # acceptable for an interactive CLI decrypt tool, not for a long-running
+    # service handling untrusted input at scale.
+    name: build (musl, static, crypto-rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y capnproto musl-tools build-essential wget unzip perl
+          rustup target add x86_64-unknown-linux-musl
+          capnp --version
+
+      - name: Cache static OpenSSL (musl)
+        id: openssl-musl-cache
+        uses: actions/cache@v4
+        with:
+          path: openssl-musl
+          key: musl-openssl-${{ env.OPENSSL_VERSION }}
+
+      - name: Build static OpenSSL for musl
+        if: steps.openssl-musl-cache.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://www.openssl.org/source/openssl-$OPENSSL_VERSION.tar.gz"
+          tar xzf "openssl-$OPENSSL_VERSION.tar.gz"
+          cd "openssl-$OPENSSL_VERSION"
+          CC=musl-gcc ./Configure no-shared no-async no-secure-memory no-engine \
+            linux-x86_64 --prefix="$GITHUB_WORKSPACE/openssl-musl" -static
+          make -j"$(nproc)"
+          make install_sw
+
+      - name: Cache static sqlite3 (musl)
+        id: sqlite-musl-cache
+        uses: actions/cache@v4
+        with:
+          path: sqlite-musl
+          key: musl-sqlite-${{ env.SQLITE_AMALGAMATION }}
+
+      - name: Build static sqlite3 for musl
+        if: steps.sqlite-musl-cache.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://www.sqlite.org/$SQLITE_YEAR/$SQLITE_AMALGAMATION.zip"
+          unzip -q "$SQLITE_AMALGAMATION.zip"
+          cd "$SQLITE_AMALGAMATION"
+          musl-gcc -c sqlite3.c -o sqlite3.o -O2 \
+            -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE
+          mkdir -p "$GITHUB_WORKSPACE/sqlite-musl/lib" "$GITHUB_WORKSPACE/sqlite-musl/include"
+          ar rcs "$GITHUB_WORKSPACE/sqlite-musl/lib/libsqlite3.a" sqlite3.o
+          cp sqlite3.h sqlite3ext.h "$GITHUB_WORKSPACE/sqlite-musl/include/"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cargo-target
+          key: musl-cargo-sq-${{ env.SQ_VERSION }}
+          restore-keys: |
+            musl-cargo-sq-
+
+      - name: Build sq (crypto-rust backend, static musl)
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
+          RUSTFLAGS: -C target-feature=+crt-static
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          OPENSSL_STATIC: "1"
+          OPENSSL_DIR: ${{ github.workspace }}/openssl-musl
+          X86_64_UNKNOWN_LINUX_MUSL_OPENSSL_DIR: ${{ github.workspace }}/openssl-musl
+          SQLITE3_STATIC: "1"
+          SQLITE3_LIB_DIR: ${{ github.workspace }}/sqlite-musl/lib
+          SQLITE3_INCLUDE_DIR: ${{ github.workspace }}/sqlite-musl/include
+        run: |
+          cargo install sequoia-sq --version "$SQ_VERSION" --locked \
+            --target x86_64-unknown-linux-musl \
+            --no-default-features \
+            --features crypto-rust,sequoia-openpgp/allow-experimental-crypto,sequoia-openpgp/allow-variable-time-crypto \
+            --root ./install
+
+      - name: Strip binary
+        run: strip --strip-all install/bin/sq
+
+      - name: Sanity check (bare musl, no glibc, no installed deps)
+        run: |
+          file install/bin/sq
+          docker run --rm -v "$PWD/install/bin:/sq" alpine:latest /sq/sq --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sq-musl-x86_64-static
+          path: install/bin/sq
+          if-no-files-found: error
+
+  publish:
+    needs: [build-al2023, build-musl]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: false
+
+      - name: Rename artifacts for release
+        run: |
+          mkdir -p release
+          cp dist/sq-al2023-x86_64-glibc/sq release/sq-al2023-x86_64-glibc
+          cp dist/sq-musl-x86_64-static/sq release/sq-musl-x86_64-static
+
+      - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.SQ_VERSION }}
           generate_release_notes: true
-          files: install/bin/sq
+          files: |
+            release/sq-al2023-x86_64-glibc
+            release/sq-musl-x86_64-static
